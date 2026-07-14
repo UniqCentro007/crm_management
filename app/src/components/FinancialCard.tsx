@@ -106,7 +106,8 @@ export default function FinancialCard({ candidateId, pipeline, accentColor, mode
   const handleNetPayableSave = (val: string) => {
     const num = parseFloat(val.replace(/[^0-9.-]/g, ''));
     if (!isNaN(num) && num >= 0) {
-      const adjustedBaseFee = num - calc.totalAdjustments;
+      // Base fee = Net Payable + Total Adjustments (if totalAdjustments is discount, we add it back to get base)
+      const adjustedBaseFee = num + calc.totalAdjustments;
       updateFinancialPipeline(candidateId, pipeline.pipelineType, { baseFee: adjustedBaseFee });
       showToast('Net payable updated');
     }

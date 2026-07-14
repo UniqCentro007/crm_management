@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus } from 'lucide-react';
 
 import { useStore } from '@/store/useStore';
+import { sheetsApi } from '@/services/sheetsApi';
 import type { PipelineType, BGVStatus, DocumentStatus } from '@/types';
 import TopNavigationBar from '@/components/TopNavigationBar';
 import Toast from '@/components/Toast';
@@ -73,6 +74,38 @@ export default function CandidateProfile() {
     setPaymentType(activePipeline);
   }, [activePipeline]);
 
+  // Local optimistic state for Document Vault to prevent polling reverts
+  const pendingDocsRef = useRef<Record<string, number>>({});
+  const [localDocsReceived, setLocalDocsReceived] = useState<DocumentStatus | null>(null);
+  const [localDocsApplied, setLocalDocsApplied] = useState<DocumentStatus | null>(null);
+
+  // Sync local docs with global store unless a mutation is actively pending
+  useEffect(() => {
+    if (!candidate) return;
+    setLocalDocsReceived(prev => {
+      const next = { ...candidate.documentsReceived };
+      if (prev) {
+        for (const k in next) {
+          if (pendingDocsRef.current[`recv_${k}`]) {
+            next[k as keyof DocumentStatus] = prev[k as keyof DocumentStatus];
+          }
+        }
+      }
+      return next;
+    });
+    setLocalDocsApplied(prev => {
+      const next = { ...candidate.documentsApplied };
+      if (prev) {
+        for (const k in next) {
+          if (pendingDocsRef.current[`apply_${k}`]) {
+            next[k as keyof DocumentStatus] = prev[k as keyof DocumentStatus];
+          }
+        }
+      }
+      return next;
+    });
+  }, [candidate?.documentsReceived, candidate?.documentsApplied]);
+
   if (!candidate) {
     return (
       <div className="min-h-screen bg-cc-base-deep pt-20 flex items-center justify-center">
@@ -137,19 +170,84 @@ export default function CandidateProfile() {
     });
     showToast('Company removed');
   };
+  const handleToggleDocReceived = async (key: keyof DocumentStatus) => {
+    if (!candidate || !localDocsReceived) return;
+    
+    // 1. Capture previous state and increment mutation version
+    const previousState = localDocsReceived[key];
+    const newState = !previousState;
+    const versionKey = `recv_${key}`;
+    const currentVersion = (pendingDocsRef.current[versionKey] || 0) + 1;
+    pendingDocsRef.current[versionKey] = currentVersion;
 
-  const handleToggleDocReceived = (key: keyof DocumentStatus) => {
+    // 2. Immediately update local React state for instantaneous UI response
+    setLocalDocsReceived(prev => prev ? { ...prev, [key]: newState } : null);
+    
+    // Also update global Zustand store (fire-and-forget for other components)
     updateCandidate(candidate.id, {
-      documentsReceived: { ...candidate.documentsReceived, [key]: !candidate.documentsReceived[key] },
+      documentsReceived: { ...candidate.documentsReceived, [key]: newState },
     });
-    showToast('Document updated');
+
+    try {
+      // 4. Await backend API directly to guarantee it completes
+      await sheetsApi.updateCandidate(candidate.id, {
+        documentsReceived: { ...candidate.documentsReceived, [key]: newState },
+      });
+      
+      // If version hasn't changed (no rapid re-clicks), remove the pending lock
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        delete pendingDocsRef.current[versionKey];
+      }
+    } catch (error) {
+      console.error('Document update failed:', error);
+      showToast('Failed to update document', 'error');
+      
+      // Rollback only if we are still the active mutation
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        setLocalDocsReceived(prev => prev ? { ...prev, [key]: previousState } : null);
+        updateCandidate(candidate.id, {
+          documentsReceived: { ...candidate.documentsReceived, [key]: previousState },
+        });
+        delete pendingDocsRef.current[versionKey];
+      }
+    }
   };
 
-  const handleToggleDocApplied = (key: keyof DocumentStatus) => {
+  const handleToggleDocApplied = async (key: keyof DocumentStatus) => {
+    if (!candidate || !localDocsApplied) return;
+    
+    const previousState = localDocsApplied[key];
+    const newState = !previousState;
+    const versionKey = `apply_${key}`;
+    const currentVersion = (pendingDocsRef.current[versionKey] || 0) + 1;
+    pendingDocsRef.current[versionKey] = currentVersion;
+
+    setLocalDocsApplied(prev => prev ? { ...prev, [key]: newState } : null);
+    
     updateCandidate(candidate.id, {
-      documentsApplied: { ...candidate.documentsApplied, [key]: !candidate.documentsApplied[key] },
+      documentsApplied: { ...candidate.documentsApplied, [key]: newState },
     });
-    showToast('Document updated');
+
+    try {
+      await sheetsApi.updateCandidate(candidate.id, {
+        documentsApplied: { ...candidate.documentsApplied, [key]: newState },
+      });
+      
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        delete pendingDocsRef.current[versionKey];
+      }
+    } catch (error) {
+      console.error('Document update failed:', error);
+      showToast('Failed to update document', 'error');
+      
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        setLocalDocsApplied(prev => prev ? { ...prev, [key]: previousState } : null);
+        updateCandidate(candidate.id, {
+          documentsApplied: { ...candidate.documentsApplied, [key]: previousState },
+        });
+        delete pendingDocsRef.current[versionKey];
+      }
+    }
   };
 
   const handleSavePayment = async () => {
@@ -447,8 +545,8 @@ export default function CandidateProfile() {
               transition={{ delay: 0.3 }}
             >
               <DocumentVault
-                received={candidate.documentsReceived}
-                applied={candidate.documentsApplied}
+                received={localDocsReceived || candidate.documentsReceived}
+                applied={localDocsApplied || candidate.documentsApplied}
                 onToggleReceived={handleToggleDocReceived}
                 onToggleApplied={handleToggleDocApplied}
               />

@@ -183,12 +183,12 @@ function mapGasRowToCandidate(rawRow: Record<string, string>): Candidate {
       bgvDocumentAmount: row.documentamount || row.documentAmount || row.bgvdocumentamount || undefined,
       placed: toBool(row.placed),
       placedCompany: row.placedcompany || undefined,
-      pastEmployment: parseJsonArray(row.pastemployment, []),
-      documentsReceived: parseJsonField(row.documentsreceived, {
+      pastEmployment: parseJsonArray(row.pastEmployment || row.pastemployment, []),
+      documentsReceived: parseJsonField(row.documentsReceived || row.documentsreceived, {
         offerLetter: false, appraisals: false, payslips: false,
         relievingLetter: false, counterOffer: false,
       }),
-      documentsApplied: parseJsonField(row.documentsapplied, {
+      documentsApplied: parseJsonField(row.documentsApplied || row.documentsapplied, {
         offerLetter: false, appraisals: false, payslips: false,
         relievingLetter: false, counterOffer: false,
       }),
@@ -270,9 +270,46 @@ export const useStore = create<AppState>((set, get) => ({
       const response = await sheetsApi.fetchAllData();
 
       if (response.success && Array.isArray(response.candidates) && response.candidates.length > 0) {
-        // Map all candidates using robust header normalization, then filter blanks
+        const oldCandidates = get().candidates;
         const mappedCandidates = response.candidates
-          .map(mapGasRowToCandidate)
+          .map((row) => {
+            const mapped = mapGasRowToCandidate(row);
+            const oldC = oldCandidates.find(c => c.id === mapped.id);
+            
+            if (response.financials && response.financials.length > 0) {
+              const cFinancials = response.financials.filter(r => r.candidateId === mapped.id);
+              if (cFinancials.length > 0) {
+                mapped.financials = mapped.financials.map(f => {
+                  const r = cFinancials.find(cf => cf.pipelineType === f.pipelineType);
+                  if (!r) return f;
+                  const parsedBaseFee = parseFloat(r.baseFee);
+                  const parsedPaidToDate = parseFloat(r.paidToDate);
+                  const parsedTotalAdj = parseFloat(r.totalAdjustments) || 0;
+                  
+                  let adjustments = [];
+                  if (r.adjustmentsJson) {
+                    try { adjustments = JSON.parse(r.adjustmentsJson); } catch(e){}
+                  }
+                  if (adjustments.length === 0 && parsedTotalAdj !== 0) {
+                    adjustments = [{ id: 'server_adj', amount: parsedTotalAdj, label: 'Server adjustment', reason: '', createdAt: '', userStamp: '' }];
+                  }
+                  return {
+                    ...f,
+                    baseFee: !isNaN(parsedBaseFee) ? parsedBaseFee : f.baseFee,
+                    paidToDate: !isNaN(parsedPaidToDate) ? parsedPaidToDate : 0,
+                    adjustments
+                  };
+                });
+              } else if (oldC) {
+                mapped.financials = oldC.financials;
+              }
+            } else if (oldC) {
+              // Never wipe existing financials if response omits them
+              mapped.financials = oldC.financials;
+            }
+            
+            return mapped;
+          })
           .filter((c) => c.fullName || c.email || c.phone);
 
         // Build tracked list from candidates that have trackedStatus

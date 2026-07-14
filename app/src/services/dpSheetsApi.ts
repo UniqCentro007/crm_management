@@ -126,7 +126,7 @@ export const dpSheetsApi = {
           placementId: payload.placementId,
           candidateName: payload.candidateName || 'Unknown',
           documentType: payload.documentType,
-          received: String(payload.received),
+          status: String(payload.received),
           performedBy: payload.performedBy || 'System'
         }),
       }, 15000);

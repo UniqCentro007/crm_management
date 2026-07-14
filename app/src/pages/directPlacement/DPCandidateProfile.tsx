@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router';
 import { motion } from 'framer-motion';
 import { Plus } from 'lucide-react';
@@ -63,6 +63,37 @@ export default function DPCandidateProfile() {
   const [pendingBgvValue, setPendingBgvValue] = useState<DPBGVStatus>('pending');
   const [showPaymentForm, setShowPaymentForm] = useState(false);
 
+  // Local optimistic state for Document Vault to prevent polling reverts
+  const pendingDocsRef = useRef<Record<string, number>>({});
+  const [localDocsReceived, setLocalDocsReceived] = useState<Record<string, boolean> | null>(null);
+
+  // Sync local docs with global store unless a mutation is actively pending
+  useEffect(() => {
+    if (!candidate) return;
+    
+    const isTruthy = (val: any) => val === true || val === 'TRUE' || val === 'true';
+    
+    const storeReceived = {
+      offerLetter: isTruthy(candidate.offerLetter),
+      appraisals: isTruthy(candidate.pfServiceHistory),
+      payslips: isTruthy(candidate.payslip),
+      relievingLetter: isTruthy(candidate.relievingLetter),
+      counterOffer: false
+    };
+
+    setLocalDocsReceived(prev => {
+      const next = { ...storeReceived };
+      if (prev) {
+        for (const k in next) {
+          if (pendingDocsRef.current[`recv_${k}`]) {
+            next[k as keyof typeof next] = prev[k as keyof typeof prev];
+          }
+        }
+      }
+      return next;
+    });
+  }, [candidate]);
+
   if (!candidate) {
     return (
       <div className="min-h-screen bg-cc-base-deep pt-20 flex items-center justify-center">
@@ -118,19 +149,41 @@ export default function DPCandidateProfile() {
       handleUpdateField('candidateStatus', 'completed');
     }
   };
-
   const handleToggleDocReceived = async (key: any) => {
+    if (!candidate || !localDocsReceived) return;
+    
+    // 1. Map key to backend key
     let actualKey = key;
     if (key === 'appraisals') actualKey = 'pfServiceHistory';
     if (key === 'payslips') actualKey = 'payslip';
     
-    const currentVal = Boolean(candidate[actualKey as keyof typeof candidate]);
-    const newStatus = !currentVal;
+    // 2. Capture previous state and increment mutation version
+    const previousState = localDocsReceived[key];
+    const newState = !previousState;
+    const versionKey = `recv_${key}`;
+    const currentVersion = (pendingDocsRef.current[versionKey] || 0) + 1;
+    pendingDocsRef.current[versionKey] = currentVersion;
+
+    // 3. Immediately update local React state for instantaneous UI response
+    setLocalDocsReceived(prev => prev ? { ...prev, [key]: newState } : null);
     
     try {
-      await toggleDocumentStatus(candidate.placementId, actualKey, newStatus, 'System');
+      // 4. Await backend API directly to guarantee it completes
+      await toggleDocumentStatus(candidate.placementId, actualKey, newState, 'System');
+      
+      // If version hasn't changed (no rapid re-clicks), remove the pending lock
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        delete pendingDocsRef.current[versionKey];
+      }
     } catch (error) {
       console.error('Failed to update DP document status:', error);
+      showToast('Failed to update document', 'error');
+      
+      // Rollback only if we are still the active mutation
+      if (pendingDocsRef.current[versionKey] === currentVersion) {
+        setLocalDocsReceived(prev => prev ? { ...prev, [key]: previousState } : null);
+        delete pendingDocsRef.current[versionKey];
+      }
     }
   };
 
@@ -337,7 +390,7 @@ export default function DPCandidateProfile() {
             >
               <DocumentVault
                 mode="dp"
-                received={receivedCompat as any}
+                received={(localDocsReceived || receivedCompat) as any}
                 applied={{ offerLetter: false, appraisals: false, payslips: false, relievingLetter: false, counterOffer: false } as any}
                 onToggleReceived={handleToggleDocReceived}
                 onToggleApplied={() => {}}

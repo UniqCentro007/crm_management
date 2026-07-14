@@ -335,8 +335,14 @@ app.put('/api/update', (req, res) => {
       return res.status(404).json({ error: `Record with ${idField}=${idValue} not found in ${sheetName}` });
     }
     
-    // Update fields
-    rows[rowIndex] = { ...rows[rowIndex], ...values };
+    // Update fields and stringify objects to avoid [object Object] in Excel
+    const newValues = { ...values };
+    for (const key in newValues) {
+      if (typeof newValues[key] === 'object' && newValues[key] !== null) {
+        newValues[key] = JSON.stringify(newValues[key]);
+      }
+    }
+    rows[rowIndex] = { ...rows[rowIndex], ...newValues };
     
     const newWorksheet = xlsx.utils.json_to_sheet(rows);
     workbook.Sheets[sheetName] = newWorksheet;
