@@ -22,7 +22,10 @@ var DP_BGV_SHEET = 'DP_BGV_Responses';
 var DP_PAYMENT_SHEET = 'Direct_Payment_Records';
 var DP_FINANCIAL_LEDGER_SHEET = 'Direct_Financial_Ledger';
 var DP_ADJUSTMENT_SHEET = 'Direct_Adjustment_Records';
+var DP_LEDGER_SHEET = 'Direct_Financial_Ledger';
 var DP_AUDIT_LOGS_SHEET = 'Direct_System_Audit_Logs';
+var DP_FORM_RESPONSES_4 = 'Form Responses 4';
+var DP_FORM_RESPONSES_5 = 'Form Responses 5';
 
 // ============================================================
 // ENTRY POINTS
@@ -913,31 +916,29 @@ function findValue(namedValues, target) {
 
 function onFormSubmit(e) {
   try {
-    var namedValues = (e && e.namedValues) ? e.namedValues : {};
+    Logger.log("onFormSubmit Triggered");
 
-    Logger.log("RAW namedValues = " + JSON.stringify(namedValues));
-    Logger.log("namedValues keys = " + Object.keys(namedValues).join(", "));
+    if (!e || !e.range) return;
 
-    var rawSheetName = e.range ? e.range.getSheet().getName() : '';
-    
-    var isDPRegForm = false;
-    if (rawSheetName === 'Form responses 13' || rawSheetName === DP_REGISTRATION_SHEET) {
-      isDPRegForm = true;
-    }
+    var sheetName = e.range.getSheet().getName();
+    var normalizedSheetName = sheetName.replace(/_/g, ' ').trim().toLowerCase();
 
-    if (isDPRegForm) {
-      Logger.log("Detected Direct Placement Form Submission");
+    // 1. Check for Direct Placement Form Responses 4
+    if (normalizedSheetName === "form responses 4") {
+      Logger.log("Detected Direct Placement Form Responses 4");
       syncDirectPlacement(e);
-      return; // Stop here, handled entirely by syncDirectPlacement
+      return;
     }
-    if (rawSheetName === DP_BGV_SHEET || rawSheetName === 'Direct_BGV_Responses') {
-      Logger.log("Direct Placement BGV form detected from sheet: " + rawSheetName);
+
+    // 2. Check for Direct Placement BGV Form Responses 5
+    if (normalizedSheetName === "form responses 5") {
+      Logger.log("Detected Direct Placement BGV Form Responses 5");
       syncDirectBGV(e);
       return;
     }
 
-    // --- BGV FORM DETECTION ---
-    var isBgvForm = false;
+    // Existing Training CRM Logic matches
+    var rawSheetName = sheetName;
     if (rawSheetName === BGV_RESPONSES_SHEET || rawSheetName === 'BGV_Responses') {
       isBgvForm = true;
     } else {
@@ -2476,13 +2477,13 @@ function syncDirectPlacement() {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     
-    var dpFormSheet = ss.getSheetByName('Form responses 13');
+    var dpFormSheet = ss.getSheetByName(DP_FORM_RESPONSES_4) || ss.getSheetByName('Form_Responses4');
     if (!dpFormSheet) {
-      Logger.log("Form responses 13 not found.");
-      return { success: false, error: "Form responses 13 not found." };
+      Logger.log("Direct Placement Registration Form sheet not found (tried 'Form Responses 4' and 'Form_Responses4').");
+      return { success: false, error: "Direct Placement Form sheet not found." };
     }
     
-    Logger.log("Detecting source sheet: Form responses 13");
+    Logger.log("Detecting source sheet: " + dpFormSheet.getName());
     var formData = dpFormSheet.getDataRange().getValues();
     if (formData.length < 2) {
       Logger.log("No registration data found.");
@@ -2542,7 +2543,7 @@ function syncDirectPlacement() {
       var syncStatus = String(rowObj['syncStatus'] || '').trim().toLowerCase();
       
       if (syncStatus !== 'true' && syncStatus !== 'synced') {
-        Logger.log("Processing Form responses 13 row " + r);
+        Logger.log("Processing DP Registration row " + r);
         
         function getVal(keys) {
           for (var i = 0; i < keys.length; i++) {
@@ -2595,12 +2596,15 @@ function syncDirectPlacement() {
           }
         }
         
+        // Generate Placement ID if new
         var now = new Date().toISOString();
         var placementId = '';
         var isNew = false;
+        var previousCandidateStatus = '';
         
         if (matchedIdx !== -1) {
           placementId = existingData[matchedIdx]['placementId'];
+          previousCandidateStatus = existingData[matchedIdx]['candidateStatus'] || '';
           Logger.log("Duplicate detected! Matched existing record: " + placementId);
         } else {
           maxId++;
@@ -2697,7 +2701,11 @@ function syncDirectPlacement() {
         dpRegSheet.appendRow(newRegRow);
         Logger.log("Wrote record into DP_Registration_Res for " + placementId);
         
-        // Mark Form responses 13 as synced
+        // --- 4. FINANCIAL LEDGER & 6. AUDIT LOGS ---
+        upsertDirectFinancialLedger(ss, placementId, nameObj, 'registration');
+        logDirectAudit(ss, placementId, nameObj, 'REGISTRATION', isNew ? 'CANDIDATE_CREATED' : 'CANDIDATE_UPDATED', isNew ? 'Candidate registered via Direct Placement Form' : 'Candidate updated via Direct Placement Form', previousCandidateStatus, 'Registered', 'System');
+        
+        // Mark Form Sheet as synced
         dpFormSheet.getRange(r + 1, syncColIdx + 1).setValue('synced');
         synced++;
       }
@@ -2867,7 +2875,7 @@ function addDirectPayment(params) {
     var readableType = String(paymentType).replace(/([A-Z])/g, ' $1').replace(/^./, function(s){ return s.toUpperCase(); }).trim();
     logDirectAudit(ss, placementId, candidateName, 'FINANCE', 'PAYMENT_ADDED', readableType + ' Added Rs.' + amount, '', '', params.userStamp || 'System');
     
-    upsertDirectFinancialLedger(ss, placementId, candidateName);
+    upsertDirectFinancialLedger(ss, placementId, candidateName, params.pipelineType || 'document');
     SpreadsheetApp.flush();
     
     return { success: true, paymentId: paymentId };
@@ -2911,9 +2919,11 @@ function updateDirectPayment(params) {
       setByHeader(sheet, headers, targetRow, key, updates[key]);
     }
     
+    var pipelineType = updates.pipelineType || data[targetRow - 1][findHeaderCol(headers, 'pipelineType')] || 'document';
+    
     logDirectAudit(ss, placementId, candidateName, 'FINANCE', 'PAYMENT_UPDATED', 'Updated Payment ' + paymentId, '', '', params.userStamp || 'System');
     
-    upsertDirectFinancialLedger(ss, placementId, candidateName);
+    upsertDirectFinancialLedger(ss, placementId, candidateName, pipelineType);
     SpreadsheetApp.flush();
     return { success: true, message: 'Payment updated' };
   } catch (err) {
@@ -2947,11 +2957,13 @@ function deleteDirectPayment(params) {
     
     if (targetRow === -1) return { success: false, error: 'Payment not found' };
     
+    var pipelineType = data[targetRow - 1][findHeaderCol(headers, 'pipelineType')] || 'document';
+    
     sheet.deleteRow(targetRow);
     
     logDirectAudit(ss, placementId, candidateName, 'FINANCE', 'PAYMENT_DELETED', 'Deleted Payment ' + paymentId, '', '', params.userStamp || 'System');
     
-    upsertDirectFinancialLedger(ss, placementId, candidateName);
+    upsertDirectFinancialLedger(ss, placementId, candidateName, pipelineType);
     SpreadsheetApp.flush();
     return { success: true, message: 'Payment deleted' };
   } catch (err) {
@@ -3206,44 +3218,6 @@ function deleteDPDocument(params) {
   }
 }
 
-
-
-function logDirectAudit(ss, placementId, candidateName, category, action, description, oldValue, newValue, performedBy) {
-  try {
-    var sheetCols = ['logId', 'timestamp', 'placementId', 'candidateName', 'category', 'action', 'description', 'performedBy', 'oldValue', 'newValue'];
-    var sheet = ensureSheetWithColumns(ss, DP_AUDIT_LOGS_SHEET, sheetCols);
-    
-    var logId = 'dplog_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-    var now = new Date().toISOString();
-    
-    // Some calls might pass 8 arguments instead of 9 (e.g. logDirectAudit(ss, pId, cName, cat, act, oldV, newV, perfBy))
-    // We can detect this based on the number of arguments, but since JS doesn't complain, we just check if performedBy is undefined.
-    if (performedBy === undefined) {
-      // It was called with 8 args: (ss, placementId, candidateName, category, action, descriptionOrOldValue, newValue, performedBy)
-      performedBy = newValue;
-      newValue = oldValue;
-      oldValue = description;
-      description = '';
-    }
-    
-    var row = buildRowByHeaders(sheetCols, {
-      logId: logId,
-      timestamp: now,
-      placementId: placementId || '',
-      candidateName: candidateName || '',
-      category: category || '',
-      action: action || '',
-      description: description || '',
-      performedBy: performedBy || 'System',
-      oldValue: oldValue || '',
-      newValue: newValue || ''
-    });
-    
-    sheet.appendRow(row);
-  } catch(e) {
-    Logger.log("logDirectAudit error: " + e.toString());
-  }
-}
 
 
 
@@ -3562,7 +3536,7 @@ function processDirectBgvRow_(e, ss, namedValues, rawRowIndex, rawSheetName) {
             pSheet.appendRow(pRow);
             
             logDirectAudit(ss, matchedPlacementId, matchedFullName, 'FINANCE', 'PAYMENT_ADDED', 'Document Payment Added Rs.' + bDocAmt, '', '', 'System');
-            upsertDirectFinancialLedger(ss, matchedPlacementId, matchedFullName);
+            upsertDirectFinancialLedger(ss, matchedPlacementId, matchedFullName, 'document');
           }
         }
       }
@@ -3584,69 +3558,38 @@ function syncDirectBGV(e) {
       return processDirectBgvRow_(e, ss, e.namedValues, e.range ? e.range.getRow() : new Date().getTime(), e.range ? e.range.getSheet().getName() : 'raw');
     } else {
       Logger.log("syncDirectBGV: Running in Manual Sync Bulk Mode");
-      var allSheets = ss.getSheets();
-      var syncedCount = 0;
+      var bgvSheet = ss.getSheetByName(DP_FORM_RESPONSES_5) || ss.getSheetByName('Form_Responses5');
+      if (!bgvSheet) {
+        Logger.log("Direct Placement BGV Form sheet not found (tried 'Form Responses 5' and 'Form_Responses5').");
+        return { success: false, error: "Direct Placement BGV Form sheet not found." };
+      }
       
-      for (var s = 0; s < allSheets.length; s++) {
-        var rawSheet = allSheets[s];
-        var sName = rawSheet.getName();
-        
-        // Skip CRM system sheets except DP_BGV_Responses
-        if (sName === 'Direct_Placement_Master' || sName === 'Registration_Res' || sName === 'Direct_Payment_Records' || sName === 'Direct_Financial_Ledger' || sName === 'Direct_System_Audit_Logs' || sName === 'Schema_Map' || sName === 'Master_Candidates') continue;
-        
-        var rawData = rawSheet.getDataRange().getValues();
-        if (rawData.length < 2) continue;
-        
-        var headers = rawData[0].map(function(h) { return String(h).trim(); });
-        var headerStr = headers.join("").toLowerCase();
-        
-        // 1 & 5. Prioritize DP_BGV_SHEET, otherwise detect correct sheet dynamically
-        var isBgvRaw = false;
-        if (sName === DP_BGV_SHEET) {
-          isBgvRaw = true;
-        } else {
-          // 2. Use normalized header matching instead of exact text
-          var hasPlacement = false;
-          var hasName = false;
-          var hasAmount = false;
-          
-          for (var hIdx = 0; hIdx < headers.length; hIdx++) {
-            // 4. Use existing normalizeHeader_() function
-            var normH = normalizeHeader_(headers[hIdx]);
-            
-            // 3. Accept variations
-            if (normH === 'placementid') hasPlacement = true;
-            if (normH === 'candidatename' || normH === 'fullname' || normH === 'name') hasName = true;
-            if (normH === 'documentamount' || normH === 'documentfee' || normH === 'bgvamount' || normH === 'amountpaid') hasAmount = true;
+      var rawData = bgvSheet.getDataRange().getValues();
+      if (rawData.length < 2) {
+        return { success: true, message: "No data in BGV Form Sheet" };
+      }
+      
+      var headers = rawData[0].map(function(h) { return String(h).trim(); });
+      var syncColIdx = findHeaderCol(headers, 'syncStatus');
+      if (syncColIdx === -1) {
+        syncColIdx = headers.length;
+        bgvSheet.getRange(1, syncColIdx + 1).setValue('syncStatus');
+        headers.push('syncStatus');
+      }
+      
+      var syncedCount = 0;
+      for (var r = 1; r < rawData.length; r++) {
+        if (!rawData[r].join("").trim()) continue;
+        var status = String(rawData[r][syncColIdx] || '').trim().toLowerCase();
+        if (status !== 'synced' && status !== 'candidate_not_found') {
+          var namedVals = {};
+          for (var c = 0; c < headers.length; c++) {
+            namedVals[headers[c]] = [rawData[r][c]];
           }
-          
-          // 6. Automatically detect if it contains enough identifying BGV headers
-          if (hasPlacement || (hasName && hasAmount)) {
-            isBgvRaw = true;
-          }
-        }        
-        if (isBgvRaw) {
-          var syncColIdx = findHeaderCol(headers, 'syncStatus');
-          if (syncColIdx === -1) {
-            syncColIdx = headers.length;
-            rawSheet.getRange(1, syncColIdx + 1).setValue('syncStatus');
-            headers.push('syncStatus');
-          }
-          
-          for (var r = 1; r < rawData.length; r++) {
-            if (!rawData[r].join("").trim()) continue;
-            var status = String(rawData[r][syncColIdx] || '').trim().toLowerCase();
-            if (status !== 'synced' && status !== 'candidate_not_found') {
-              var namedVals = {};
-              for (var c = 0; c < headers.length; c++) {
-                namedVals[headers[c]] = [rawData[r][c]];
-              }
-              var result = processDirectBgvRow_(null, ss, namedVals, r + 1, sName);
-              if (result && result.success) {
-                rawSheet.getRange(r + 1, syncColIdx + 1).setValue('Synced');
-                syncedCount++;
-              }
-            }
+          var result = processDirectBgvRow_(null, ss, namedVals, r + 1, bgvSheet.getName());
+          if (result && result.success) {
+            bgvSheet.getRange(r + 1, syncColIdx + 1).setValue('Synced');
+            syncedCount++;
           }
         }
       }
